@@ -12,6 +12,7 @@ the teacher's outputs on held-out data. (This is distinct from how well either
 model predicts the ground truth.)
 
 This script trains the teacher, fits and tunes the surrogate via GridSearchCV,
+
 and reports fidelity on the test set.
 
 The problem
@@ -88,7 +89,7 @@ def fit_surrogate(train_df, feature_names, teacher):
     print(f"Top forest drivers: {[str(f) for f in ranked[-3:][::-1]]}")
 
     # Regression target for the surrogate.
-    target = sample["target"].values
+    target = teacher.predict(sample[feature_names])
 
     param_grid = {
         "n_estimators": [300, 600],
@@ -102,12 +103,28 @@ def fit_surrogate(train_df, feature_names, teacher):
         random_state=RANDOM_STATE,
         n_jobs=1,
     )
+       
     search = GridSearchCV(base, param_grid, scoring="r2", cv=5, n_jobs=-1)
     search.fit(X, target)
 
     print(f"Best CV score (R^2): {search.best_score_:.4f}")
     print(f"Best params       : {search.best_params_}")
-    return search.best_estimator_, scaler
+
+    full_scaler = StandardScaler().fit(train_df[feature_names])
+    X_full = full_scaler.transform(train_df[feature_names])
+    y_full = teacher.predict(train_df[feature_names])
+
+    best_model = XGBRegressor(
+        objective="reg:squarederror",
+        min_child_weight=12,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        **search.best_params_
+    )
+
+    best_model.fit(X_full, y_full)
+
+    return best_model, full_scaler
 
 
 def evaluate(teacher, surrogate, scaler, X_test, y_test, feature_names):
