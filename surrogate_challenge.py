@@ -87,14 +87,15 @@ def fit_surrogate(train_df, feature_names, teacher):
     ranked = np.array(feature_names)[np.argsort(teacher.feature_importances_)]
     print(f"Top forest drivers: {[str(f) for f in ranked[-3:][::-1]]}")
 
-    # Regression target for the surrogate.
-    target = sample["target"].values
+    # Regression target for the surrogate: teacher predictions, not ground truth.
+    target = teacher.predict(sample[feature_names].values)
 
     param_grid = {
         "n_estimators": [300, 600],
         "max_depth": [3, 5],
         "learning_rate": [0.03, 0.05, 0.1],
     }
+
     base = XGBRegressor(
         objective="reg:squarederror",
         # Regularization so individual trees don't chase noise.
@@ -102,12 +103,29 @@ def fit_surrogate(train_df, feature_names, teacher):
         random_state=RANDOM_STATE,
         n_jobs=1,
     )
+
     search = GridSearchCV(base, param_grid, scoring="r2", cv=5, n_jobs=-1)
     search.fit(X, target)
 
     print(f"Best CV score (R^2): {search.best_score_:.4f}")
     print(f"Best params       : {search.best_params_}")
-    return search.best_estimator_, scaler
+
+    # Refit the final surrogate on the full training set using teacher outputs.
+    final_scaler = StandardScaler().fit(train_df[feature_names])
+    X_full = final_scaler.transform(train_df[feature_names])
+    y_full_teacher = teacher.predict(train_df[feature_names].values)
+
+    final_model = XGBRegressor(
+        objective="reg:squarederror",
+        min_child_weight=12,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        **search.best_params_,
+    )
+
+    final_model.fit(X_full, y_full_teacher)
+
+    return final_model, final_scaler
 
 
 def evaluate(teacher, surrogate, scaler, X_test, y_test, feature_names):
@@ -128,11 +146,15 @@ def evaluate(teacher, surrogate, scaler, X_test, y_test, feature_names):
 
     print("\n=== Verdict ===")
     if fidelity_r2 > PASS_THRESHOLD:
-        print(f"PASS  fidelity {fidelity_r2:.4f} > {PASS_THRESHOLD} -- "
-              "surrogate faithfully reproduces the forest.")
+        print(
+            f"PASS  fidelity {fidelity_r2:.4f} > {PASS_THRESHOLD} -- "
+            "surrogate faithfully reproduces the forest."
+        )
     else:
-        print(f"FAIL  fidelity {fidelity_r2:.4f} <= {PASS_THRESHOLD} -- "
-              "the surrogate is not tracking the forest closely enough.")
+        print(
+            f"FAIL  fidelity {fidelity_r2:.4f} <= {PASS_THRESHOLD} -- "
+            "the surrogate is not tracking the forest closely enough."
+        )
 
 
 def main():
@@ -140,6 +162,7 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=RANDOM_STATE
     )
+
     teacher = fit_teacher(X_train, y_train)
 
     train_df = X_train.copy()
